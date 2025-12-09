@@ -3,9 +3,6 @@ package logger
 import (
 	"compress/gzip"
 	"fmt"
-	rotate "github.com/lestrrat-go/file-rotatelogs"
-	"github.com/rifflock/lfshook"
-	"github.com/sirupsen/logrus"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,7 +10,12 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/lestrrat-go/file-rotatelogs"
+	"github.com/rifflock/lfshook"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -29,20 +31,22 @@ var (
 	configs       = make(map[string]*logConfig)
 	loggers       = make(map[string]*logrus.Logger)
 	defaultLogger = logrus.New()
+	once          sync.Once
 )
 
-func init() {
-	var content []byte
-	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-	if err == nil {
-		content, err = os.ReadFile(filepath.Join(dir, "../log.properties"))
-	}
-	if err != nil {
-		panic(err)
-	}
-	parseConfigs(content)
-	createLoggers()
-	createDefaultLogger()
+func New(configFile string) (err error) {
+	once.Do(func() {
+		var content []byte
+		content, err = os.ReadFile(configFile)
+		if err == nil {
+			_configs := parseConfigs(content)
+			_loggers := createLoggers(_configs)
+			configs = _configs
+			loggers = _loggers
+		}
+		createDefaultLogger()
+	})
+	return err
 }
 
 func Switch(name string) *logrus.Logger {
@@ -59,7 +63,9 @@ func createDefaultLogger() {
 		CallerPrettyfier: newCallerPrettifier().Pretty,
 	})
 }
-func createLoggers() {
+
+func createLoggers(configs map[string]*logConfig) map[string]*logrus.Logger {
+	_loggers := make(map[string]*logrus.Logger)
 	for _, cfg := range configs {
 		if cfg.global.Suffix == "" {
 			cfg.global.Suffix = defaultRotateOptionSuffix
@@ -99,12 +105,16 @@ func createLoggers() {
 			}
 		}
 		logger.AddHook(lfshook.NewHook(writers, formatters))
-		loggers[cfg.Name] = logger
+		_loggers[cfg.Name] = logger
 	}
+	return _loggers
 }
 
-func parseConfigs(contents []byte) {
-	lines := strings.Split(string(contents), "\n")
+func parseConfigs(contents []byte) map[string]*logConfig {
+	var (
+		_configs = make(map[string]*logConfig)
+		lines    = strings.Split(string(contents), "\n")
+	)
 	for _, line := range lines {
 		texts := strings.Split(line, "#")
 		if line = strings.TrimSpace(texts[0]); line == "" {
@@ -115,14 +125,14 @@ func parseConfigs(contents []byte) {
 			continue
 		}
 		name := strings.ToLower(res[1])
-		cfg, OK := configs[name]
+		cfg, OK := _configs[name]
 		if !OK {
 			cfg = newLogConfig(name)
 			configs[name] = cfg
 		}
 		cfg.ParseConfig(res[2:])
 	}
-	return
+	return _configs
 }
 
 const (
@@ -247,7 +257,7 @@ type configItem struct {
 	json          *logrus.JSONFormatter
 	text          *logrus.TextFormatter
 	fieldMap      logrus.FieldMap
-	rotateOptions map[string]rotate.Option
+	rotateOptions map[string]rotatelogs.Option
 }
 
 func newConfigItem(defaultFileName string) *configItem {
@@ -258,7 +268,7 @@ func newConfigItem(defaultFileName string) *configItem {
 		json:          &logrus.JSONFormatter{},
 		text:          &logrus.TextFormatter{},
 		fieldMap:      make(logrus.FieldMap),
-		rotateOptions: make(map[string]rotate.Option),
+		rotateOptions: make(map[string]rotatelogs.Option),
 	}
 }
 
@@ -349,7 +359,7 @@ func (c *configItem) MergeFormatOption(cfg *configItem) {
 	}
 }
 
-func (c *configItem) MergeRotateOption(options map[string]rotate.Option, suffix string) {
+func (c *configItem) MergeRotateOption(options map[string]rotatelogs.Option, suffix string) {
 	for k, option := range options {
 		if k == rotateOptionMaxAge || k == rotateOptionCount {
 			continue
@@ -392,8 +402,8 @@ func (c *configItem) GetFormatter() (formatter logrus.Formatter) {
 	return
 }
 
-func (c *configItem) NewWriter() *rotate.RotateLogs {
-	writer, err := rotate.New(c.rotateFileName(), c.getRotateOptions()...)
+func (c *configItem) NewWriter() *rotatelogs.RotateLogs {
+	writer, err := rotatelogs.New(c.rotateFileName(), c.getRotateOptions()...)
 	if err != nil {
 		panic(err)
 	}
@@ -458,34 +468,34 @@ func (c *configItem) parseRotateOption(values []string) {
 		c.Suffix = values[2]
 	case rotateOptionMaxAge:
 		if age, err := time.ParseDuration(values[2]); err == nil && age > 0 {
-			c.rotateOptions[rotateOptionMaxAge] = rotate.WithMaxAge(age)
+			c.rotateOptions[rotateOptionMaxAge] = rotatelogs.WithMaxAge(age)
 			delete(c.rotateOptions, rotateOptionCount)
 		}
 	case rotateOptionCount:
 		if count, err := strconv.ParseUint(values[2], 10, 32); err == nil && count > 0 {
-			c.rotateOptions[rotateOptionCount] = rotate.WithRotationCount(uint(count))
+			c.rotateOptions[rotateOptionCount] = rotatelogs.WithRotationCount(uint(count))
 			delete(c.rotateOptions, rotateOptionMaxAge)
 		}
 	case rotateOptionDuration:
 		if dur, err := time.ParseDuration(values[2]); err == nil {
-			c.rotateOptions[rotateOptionDuration] = rotate.WithRotationTime(dur)
+			c.rotateOptions[rotateOptionDuration] = rotatelogs.WithRotationTime(dur)
 		}
 	case rotateOptionForceNewFile:
 		if trueValue(values[2]) {
-			c.rotateOptions[rotateOptionForceNewFile] = rotate.ForceNewFile()
+			c.rotateOptions[rotateOptionForceNewFile] = rotatelogs.ForceNewFile()
 		}
 	case rotationOptionLocation:
 		if location, err := time.LoadLocation(values[2]); err == nil {
-			c.rotateOptions[rotationOptionLocation] = rotate.WithLocation(location)
+			c.rotateOptions[rotationOptionLocation] = rotatelogs.WithLocation(location)
 		}
 	case rotationOptionSize:
 		if size, err := strconv.ParseInt(values[2], 10, 64); err == nil {
-			c.rotateOptions[rotationOptionSize] = rotate.WithRotationSize(size)
+			c.rotateOptions[rotationOptionSize] = rotatelogs.WithRotationSize(size)
 		}
 	case rotationOptionCompress:
 		if trueValue(values[2]) {
 			//TODO later
-			//c.rotateOptions[rotationOptionCompress]=rotate.WithHandler(compressor)
+			//c.rotateOptions[rotationOptionCompress]=rotatelogs.WithHandler(compressor)
 		}
 	default:
 
@@ -510,12 +520,12 @@ func (c *configItem) addFieldMap(key, value string) {
 	}
 }
 
-func (c *configItem) getRotateOptions() []rotate.Option {
-	options := make([]rotate.Option, 0, len(c.rotateOptions)+1)
+func (c *configItem) getRotateOptions() []rotatelogs.Option {
+	options := make([]rotatelogs.Option, 0, len(c.rotateOptions)+1)
 	for _, option := range c.rotateOptions {
 		options = append(options, option)
 	}
-	options = append(options, rotate.WithLinkName(c.FileName))
+	options = append(options, rotatelogs.WithLinkName(c.FileName))
 	return options
 }
 
@@ -548,9 +558,9 @@ var compressor = &compressHandler{}
 
 type compressHandler struct{}
 
-func (h *compressHandler) Handle(event rotate.Event) {
-	if event.Type() == rotate.FileRotatedEventType {
-		e := event.(*rotate.FileRotatedEvent)
+func (h *compressHandler) Handle(event rotatelogs.Event) {
+	if event.Type() == rotatelogs.FileRotatedEventType {
+		e := event.(*rotatelogs.FileRotatedEvent)
 		compress(e.PreviousFile())
 	}
 }
