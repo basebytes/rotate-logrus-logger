@@ -128,7 +128,7 @@ func parseConfigs(contents []byte) map[string]*logConfig {
 		cfg, OK := _configs[name]
 		if !OK {
 			cfg = newLogConfig(name)
-			configs[name] = cfg
+			_configs[name] = cfg
 		}
 		cfg.ParseConfig(res[2:])
 	}
